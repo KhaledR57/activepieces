@@ -122,6 +122,39 @@ describe('Platform API', () => {
             expect(responseBody.cloudAuthEnabled).toBe(false)
         }),
 
+        it('rejects updating a platform that does not belong to the caller (IDOR)', async () => {
+            const { mockPlatform: victimPlatform } = await mockAndSaveBasicSetup()
+            const { mockOwner: attackerOwner, mockPlatform: attackerPlatform } = await mockAndSaveBasicSetup()
+
+            const attackerToken = await generateMockToken({
+                type: PrincipalType.USER,
+                id: attackerOwner.id,
+                platform: { id: attackerPlatform.id },
+            })
+
+            const response = await app?.inject({
+                method: 'POST',
+                url: `/api/v1/platforms/${victimPlatform.id}`,
+                headers: {
+                    authorization: `Bearer ${attackerToken}`,
+                },
+                body: {
+                    name: 'pwned',
+                    allowedAuthDomains: ['attacker.com'],
+                    enforceAllowedAuthDomains: true,
+                } satisfies UpdatePlatformRequestBody,
+            })
+
+            expect(response?.statusCode).toBe(StatusCodes.FORBIDDEN)
+
+            const victimRow = await databaseConnection()
+                .getRepository('platform')
+                .findOneByOrFail({ id: victimPlatform.id })
+            expect(victimRow.name).toBe(victimPlatform.name)
+            expect(victimRow.allowedAuthDomains).toEqual(victimPlatform.allowedAuthDomains)
+            expect(victimRow.enforceAllowedAuthDomains).toBe(victimPlatform.enforceAllowedAuthDomains)
+        }),
+
         it('updates the platform logo icons', async () => {
             const { mockOwner, mockPlatform } = await mockAndSaveBasicSetup({
                 plan: {
