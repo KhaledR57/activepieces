@@ -1,8 +1,12 @@
-import { setupTestEnvironment, teardownTestEnvironment } from '../../../helpers/test-setup'
 import {
     apId,
     CreateProjectReleaseRequestBody,
+    DefaultProjectRole,
+    FlowStatus,
+    FlowVersionState,
+    Permission,
     ProjectReleaseType,
+    RoleType,
 } from '@activepieces/shared'
 import { faker } from '@faker-js/faker'
 import { FastifyInstance } from 'fastify'
@@ -11,11 +15,15 @@ import { db } from '../../../helpers/db'
 import {
     createMockApiKey,
     createMockFile,
+    createMockFlow,
+    createMockFlowVersion,
     createMockProject,
     createMockProjectRelease,
+    createMockProjectRole,
     mockAndSaveBasicSetup,
 } from '../../../helpers/mocks'
-import { createTestContext } from '../../../helpers/test-context'
+import { createMemberContext, createTestContext, TestContext } from '../../../helpers/test-context'
+import { setupTestEnvironment, teardownTestEnvironment } from '../../../helpers/test-setup'
 
 let app: FastifyInstance | null = null
 
@@ -313,6 +321,130 @@ describe('Project Release API', () => {
             })
 
             expect(response?.statusCode).toBe(StatusCodes.FORBIDDEN)
+        })
+    })
+
+    describe('Project release RBAC', () => {
+        async function setupReleaseScenario(): Promise<{ admin: TestContext, viewer: TestContext, editor: TestContext, targetProject: string, sourceProject: string }> {
+            const admin = await createTestContext(app!, {
+                project: { releasesEnabled: true },
+                plan: { environmentsEnabled: true },
+            })
+            const viewer = await createMemberContext(app!, admin, { projectRole: DefaultProjectRole.VIEWER })
+            const editor = await createMemberContext(app!, admin, { projectRole: DefaultProjectRole.EDITOR })
+
+            const source = createMockProject({
+                platformId: admin.platform.id,
+                ownerId: admin.user.id,
+                releasesEnabled: true,
+            })
+            await db.save('project', source)
+
+            const sourceFlow = createMockFlow({
+                projectId: source.id,
+                status: FlowStatus.ENABLED,
+                publishedVersionId: null,
+            })
+            await db.save('flow', sourceFlow)
+            await db.save('flow_version', createMockFlowVersion({
+                flowId: sourceFlow.id,
+                displayName: 'source-flow',
+                state: FlowVersionState.DRAFT,
+                valid: false,
+            }))
+
+            return { admin, viewer, editor, targetProject: admin.project.id, sourceProject: source.id }
+        }
+
+        it('should reject diff for a viewer without read release permission', async () => {
+            const { viewer, targetProject, sourceProject } = await setupReleaseScenario()
+
+            const response = await viewer.post('/v1/project-releases/diff', {
+                projectId: targetProject,
+                type: ProjectReleaseType.PROJECT,
+                targetProjectId: sourceProject,
+            })
+
+            expect(response?.statusCode).toBe(StatusCodes.FORBIDDEN)
+        })
+
+        it('should reject create for a viewer without write release permission', async () => {
+            const { viewer, targetProject, sourceProject } = await setupReleaseScenario()
+
+            const response = await viewer.post('/v1/project-releases', {
+                name: 'viewer-release',
+                description: null,
+                selectedFlowsIds: null,
+                projectId: targetProject,
+                type: ProjectReleaseType.PROJECT,
+                targetProjectId: sourceProject,
+            })
+
+            expect(response?.statusCode).toBe(StatusCodes.FORBIDDEN)
+        })
+
+        it('should allow an editor to diff and import', async () => {
+            const { admin, editor, targetProject, sourceProject } = await setupReleaseScenario()
+
+            const diff = await editor.post('/v1/project-releases/diff', {
+                projectId: targetProject,
+                type: ProjectReleaseType.PROJECT,
+                targetProjectId: sourceProject,
+            })
+            expect(diff?.statusCode).toBe(StatusCodes.OK)
+
+            const create = await editor.post('/v1/project-releases', {
+                name: 'editor-release',
+                description: null,
+                selectedFlowsIds: null,
+                projectId: targetProject,
+                type: ProjectReleaseType.PROJECT,
+                targetProjectId: sourceProject,
+            })
+            expect([StatusCodes.OK, StatusCodes.CREATED]).toContain(create?.statusCode)
+
+            const flows = await admin.get('/v1/flows', { projectId: targetProject })
+            expect(flows?.json().data.length).toBeGreaterThan(0)
+        })
+
+        it('should allow diff but reject create for a role with read but not write release permission', async () => {
+            const admin = await createTestContext(app!, {
+                project: { releasesEnabled: true },
+                plan: { environmentsEnabled: true },
+            })
+
+            const readerRole = createMockProjectRole({
+                platformId: admin.platform.id,
+                name: 'release-reader',
+                permissions: [Permission.READ_PROJECT_RELEASE],
+                type: RoleType.CUSTOM,
+            })
+            await db.save('project_role', readerRole)
+            const reader = await createMemberContext(app!, admin, { projectRole: readerRole.name })
+
+            const source = createMockProject({
+                platformId: admin.platform.id,
+                ownerId: admin.user.id,
+                releasesEnabled: true,
+            })
+            await db.save('project', source)
+
+            const diff = await reader.post('/v1/project-releases/diff', {
+                projectId: admin.project.id,
+                type: ProjectReleaseType.PROJECT,
+                targetProjectId: source.id,
+            })
+            expect(diff?.statusCode).toBe(StatusCodes.OK)
+
+            const create = await reader.post('/v1/project-releases', {
+                name: 'reader-release',
+                description: null,
+                selectedFlowsIds: null,
+                projectId: admin.project.id,
+                type: ProjectReleaseType.PROJECT,
+                targetProjectId: source.id,
+            })
+            expect(create?.statusCode).toBe(StatusCodes.FORBIDDEN)
         })
     })
 })
