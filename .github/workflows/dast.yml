@@ -140,6 +140,9 @@ jobs:
           done
           if [ -n "$found" ]; then
             cp "$found" "${GITHUB_WORKSPACE}/.zap/reports/zap-dast.sarif"
+            # Code scanning rejects https URIs (expects repo-relative paths); strip the scheme.
+            SARIF="${GITHUB_WORKSPACE}/.zap/reports/zap-dast.sarif"
+            jq 'walk(if type == "object" and (.uri? | type == "string") then .uri |= sub("^https?://"; "") else . end)' "$SARIF" > "$SARIF.tmp" && mv "$SARIF.tmp" "$SARIF"
             echo "found=true" >> "$GITHUB_OUTPUT"
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
